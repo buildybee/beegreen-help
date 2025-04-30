@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Drip Irrigation Checker</title>
+  <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: auto; padding: 1em; }
+    label { display: block; margin-top: 10px; }
+    input { width: 100%; padding: 5px; }
+    textarea { width: 100%; height: 200px; margin-top: 10px; }
+    .section { border-top: 1px solid #ccc; margin-top: 20px; padding-top: 20px; }
+    .btn { margin-top: 10px; padding: 10px; }
+    .nozzle-group { border: 1px solid #ccc; padding: 10px; margin-top: 10px; position: relative; }
+    .remove-btn { position: absolute; top: 10px; right: 10px; cursor: pointer; color: red; }
+  </style>
+</head>
+<body>
+<h1>Drip Irrigation Checker (with Mainline)</h1>
+
+<form id="irrigationForm">
+  <label>Pump Pressure (bar): <input name="pressure" type="number" step="0.1" required></label>
+  <label>Pump Flow (L/min): <input name="flow" type="number" step="0.1" required></label>
+
+  <label>Mainline Diameter (mm): <input name="main_diameter" type="number" required></label>
+  <label>Mainline Length (ft): <input name="main_length" type="number" required></label>
+
+  <label>Feeder Line Diameter (mm): <input name="feeder_diameter" type="number" required></label>
+  <label>Feeder Line Length (ft): <input name="feeder_length" type="number" required></label>
+
+  <label>Required Pressure at Nozzles (psi): <input name="required_psi" type="number" required></label>
+
+  <div class="section">
+    <h3>Nozzle Sets</h3>
+    <div id="nozzleContainer"></div>
+    <button type="button" class="btn" onclick="addNozzle()">➕ Add Nozzle</button>
+  </div>
+
+  <button type="submit" class="btn">✅ Check Setup</button>
+  <label><input type="checkbox" id="saveYaml"> Save result as YAML</label>
+</form>
+
+<div class="section">
+  <input type="file" id="yamlLoader" accept=".yaml,.yml">
+  <button onclick="loadYamlFile()" class="btn">📂 Load YAML</button>
+</div>
+
+<div class="section">
+  <h3>Result</h3>
+  <textarea id="result" readonly></textarea>
+</div>
+
+<script>
+function barToPsi(bar) {
+  return bar * 14.5;
+}
+
+function lphToLpm(lph) {
+  return lph / 60;
+}
+
+// Simplified pressure loss estimate function (linear)
+function estimatePressureLoss(length_ft, diameter_mm, flow_lph) {
+  const length_m = length_ft * 0.3048;
+  const k = 0.05;
+  return k * length_m * lphToLpm(flow_lph) / (diameter_mm / 10);
+}
+
+function checkSetup(data) {
+  const pumpPressurePsi = barToPsi(data.pump.pressure_bar);
+  const pumpFlowLph = data.pump.flow_lpm * 60;
+  const totalFlowLph = data.nozzles.reduce((sum, n) => sum + n.flow_lph * n.count, 0);
+
+  const mainLossBar = estimatePressureLoss(
+    data.mainline.length_ft,
+    data.mainline.diameter_mm,
+    totalFlowLph
+  );
+
+  const feederLossBar = estimatePressureLoss(
+    data.feeder.length_ft,
+    data.feeder.diameter_mm,
+    totalFlowLph
+  );
+
+  const totalLossBar = mainLossBar + feederLossBar;
+  const pressureAtEmittersPsi = barToPsi(data.pump.pressure_bar - totalLossBar);
+
+  let result = [];
+  result.push(`Pump Pressure: ${pumpPressurePsi.toFixed(1)} psi`);
+  result.push(`Pump Flow: ${pumpFlowLph.toFixed(1)} LPH`);
+  result.push(`Total Nozzle Flow: ${totalFlowLph.toFixed(1)} LPH`);
+  result.push(`Mainline Pressure Loss: ${mainLossBar.toFixed(2)} bar`);
+  result.push(`Feeder Pressure Loss: ${feederLossBar.toFixed(2)} bar`);
+  result.push(`Total Pressure Loss: ${totalLossBar.toFixed(2)} bar`);
+  result.push(`Pressure at Emitters: ${pressureAtEmittersPsi.toFixed(1)} psi`);
+
+  if (totalFlowLph > pumpFlowLph) {
+    result.push("❌ Pump flow is too low.");
+  }
+
+  if (pressureAtEmittersPsi < data.required_psi) {
+    result.push("❌ Pressure too low at emitters.");
+  } else {
+    result.push("✅ Setup is OK.");
+  }
+
+  return result.join("\n");
+}
+
+function addNozzle(flow = '', count = '') {
+  const container = document.getElementById("nozzleContainer");
+  const div = document.createElement("div");
+  div.className = "nozzle-group";
+  div.innerHTML = `
+    <span class="remove-btn" onclick="this.parentElement.remove()">✖</span>
+    <label>Flow (LPH): <input type="number" name="nozzle_flow" value="${flow}" required></label>
+    <label>Count: <input type="number" name="nozzle_count" value="${count}" required></label>
+  `;
+  container.appendChild(div);
+}
+
+document.getElementById("irrigationForm").addEventListener("submit", function (e) {
+  e.preventDefault();
+  const form = e.target;
+  const data = {
+    pump: {
+      pressure_bar: parseFloat(form.pressure.value),
+      flow_lpm: parseFloat(form.flow.value)
+    },
+    mainline: {
+      diameter_mm: parseFloat(form.main_diameter.value),
+      length_ft: parseFloat(form.main_length.value)
+    },
+    feeder: {
+      diameter_mm: parseFloat(form.feeder_diameter.value),
+      length_ft: parseFloat(form.feeder_length.value)
+    },
+    required_psi: parseFloat(form.required_psi.value),
+    nozzles: []
+  };
+
+  const nozzleGroups = document.querySelectorAll("#nozzleContainer .nozzle-group");
+  nozzleGroups.forEach(group => {
+    const flow = group.querySelector("[name='nozzle_flow']").value;
+    const count = group.querySelector("[name='nozzle_count']").value;
+    if (flow && count) {
+      data.nozzles.push({
+        flow_lph: parseFloat(flow),
+        count: parseInt(count)
+      });
+    }
+  });
+
+  const result = checkSetup(data);
+  document.getElementById("result").value = result;
+
+  if (document.getElementById("saveYaml").checked) {
+    const yamlData = jsyaml.dump(data);
+    const blob = new Blob([yamlData], {type: "text/yaml"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    a.download = `drip_config_${timestamp}.yaml`;
+    a.click();
+  }
+});
+
+function loadYamlFile() {
+  const input = document.getElementById("yamlLoader");
+  const file = input.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = function () {
+    const data = jsyaml.load(reader.result);
+    const form = document.getElementById("irrigationForm");
+
+    form.pressure.value = data.pump.pressure_bar;
+    form.flow.value = data.pump.flow_lpm;
+    form.main_diameter.value = data.mainline.diameter_mm;
+    form.main_length.value = data.mainline.length_ft;
+    form.feeder_diameter.value = data.feeder.diameter_mm;
+    form.feeder_length.value = data.feeder.length_ft;
+    form.required_psi.value = data.required_psi;
+
+    document.getElementById("nozzleContainer").innerHTML = "";
+    data.nozzles.forEach(n => addNozzle(n.flow_lph, n.count));
+  };
+  reader.readAsText(file);
+}
+
+// Initialize with one default nozzle input
+addNozzle();
+</script>
+</body>
+</html>
